@@ -1,64 +1,108 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:quick_call/core/widgets/app_loader.dart';
 
 import '../../../home/presentation/pages/home_page.dart';
+import '../../data/google_auth_service.dart';
 import '../../data/user_profile_store.dart';
 
-
 class ProfileGatePage extends StatefulWidget {
-  const ProfileGatePage({super.key, this.profileStore});
+  const ProfileGatePage({super.key, this.profileStore, this.authService});
 
+  // Kept injectable so profile persistence can be isolated in app previews.
   final UserProfileStore? profileStore;
+  final GoogleAuthService? authService;
 
   @override
   State<ProfileGatePage> createState() => _ProfileGatePageState();
 }
 
 class _ProfileGatePageState extends State<ProfileGatePage> {
+  late final GoogleAuthService _authService;
   late final UserProfileStore _profileStore;
-  late Future<String?> _displayName;
+  late final Stream<User?> _authChanges;
+  final Map<String, Future<String>> _profiles = {};
+  bool _signingIn = false;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
+    _authService = widget.authService ?? GoogleAuthService();
     _profileStore = widget.profileStore ?? UserProfileStore();
-    _displayName = _profileStore.loadDisplayName();
+    _authChanges = _authService.authStateChanges;
   }
 
-  void _onNameSaved(String displayName) {
-    final normalizedName = displayName.trim();
-    if (normalizedName.isEmpty) return;
-
-    setState(() => _displayName = Future.value(normalizedName));
+  Future<void> _signIn() async {
+    if (_signingIn) return;
+    setState(() {
+      _signingIn = true;
+      _errorMessage = null;
+    });
+    try {
+      await _authService.signInWithGoogle();
+    } on FirebaseAuthException catch (error) {
+      if (mounted) {
+        setState(() => _errorMessage = _friendlyAuthError(error));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _errorMessage = error is StateError
+              ? error.message
+              : 'Google sign-in could not be completed. Please try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _signingIn = false);
+    }
   }
+
+  String _friendlyAuthError(FirebaseAuthException error) =>
+      switch (error.code) {
+        'account-exists-with-different-credential' =>
+          'This email is already linked to another sign-in method.',
+        'network-request-failed' => 'Check your connection and try again.',
+        'popup-closed-by-user' ||
+        'web-context-canceled' => 'Sign-in was canceled.',
+        _ => 'Google sign-in could not be completed. Please try again.',
+      };
 
   @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<String?>(
-      future: _displayName,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const _LoadingPage();
-        }
-
-        final displayName = snapshot.data?.trim();
-        if (displayName != null && displayName.isNotEmpty) {
-          return HomePage(displayName: displayName);
-        }
-
-        if (snapshot.hasError) {
-          return _FirstNamePage(
-            profileStore: _profileStore,
-            onNameSaved: _onNameSaved,
-          );
-        }
-
-        return _FirstNamePage(
-          profileStore: _profileStore,
-          onNameSaved: _onNameSaved,
+  Widget build(BuildContext context) => StreamBuilder<User?>(
+    stream: _authChanges,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const _LoadingPage();
+      }
+      final user = snapshot.data;
+      if (user == null) {
+        return _SignInPage(
+          isLoading: _signingIn,
+          errorMessage: _errorMessage,
+          onSignIn: _signIn,
         );
-      },
-    );
-  }
+      }
+
+      final profile = _profiles.putIfAbsent(
+        user.uid,
+        () => _profileStore.saveAuthenticatedUser(user),
+      );
+      return FutureBuilder<String>(
+        future: profile,
+        builder: (context, profileSnapshot) {
+          if (profileSnapshot.hasError) {
+            final fallback = user.displayName?.trim().isNotEmpty == true
+                ? user.displayName!.trim()
+                : user.email?.split('@').first ?? 'Callify user';
+            return HomePage(displayName: fallback);
+          }
+          if (!profileSnapshot.hasData) return const _LoadingPage();
+          return HomePage(displayName: profileSnapshot.data!);
+        },
+      );
+    },
+  );
 }
 
 class _LoadingPage extends StatelessWidget {
@@ -67,141 +111,147 @@ class _LoadingPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Scaffold(
-      backgroundColor: Color(0xFF0A1628),
-      body: Center(child: CircularProgressIndicator(color: Color(0xFF06B6D4))),
+      backgroundColor: Color(0xFF0D171A),
+      body: Center(child: AppLoader()),
     );
   }
 }
 
-class _FirstNamePage extends StatefulWidget {
-  const _FirstNamePage({required this.profileStore, required this.onNameSaved});
+class _SignInPage extends StatelessWidget {
+  const _SignInPage({
+    required this.isLoading,
+    required this.errorMessage,
+    required this.onSignIn,
+  });
 
-  final UserProfileStore profileStore;
-  final ValueChanged<String> onNameSaved;
-
-  @override
-  State<_FirstNamePage> createState() => _FirstNamePageState();
-}
-
-class _FirstNamePageState extends State<_FirstNamePage> {
-  final _nameController = TextEditingController();
-  final _formKey = GlobalKey<FormState>();
-  bool _isSaving = false;
-  String? _errorMessage;
+  final bool isLoading;
+  final String? errorMessage;
+  final VoidCallback onSignIn;
 
   @override
-  void dispose() {
-    _nameController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate() || _isSaving) return;
-
-    final trimmedInput = _nameController.text.trim();
-    if (trimmedInput.isEmpty) {
-      setState(() {
-        _errorMessage = 'Enter your name';
-      });
-      return;
-    }
-
-    setState(() {
-      _isSaving = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final displayName = await widget.profileStore.saveDisplayName(trimmedInput);
-      if (!mounted) return;
-      widget.onNameSaved(displayName);
-    } on ArgumentError {
-      if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _errorMessage = 'Enter your name';
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _errorMessage = 'Could not save your name. Check your connection.';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0A1628),
-      body: SafeArea(
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: const Color(0xFF0D171A),
+    body: DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF14272A), Color(0xFF0D171A), Color(0xFF18242B)],
+        ),
+      ),
+      child: SafeArea(
         child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Form(
-              key: _formKey,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: const EdgeInsets.all(28),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(
-                    Icons.record_voice_over,
-                    color: Color(0xFF06B6D4),
-                    size: 64,
+                  Center(
+                    child: Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(22),
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF48D6C2), Color(0xFF0E8B86)],
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.graphic_eq_rounded,
+                        color: Color(0xFF082321),
+                        size: 40,
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 28),
                   const Text(
-                    'What should people call you?',
+                    'Meet someone new.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 28,
+                      height: 1.15,
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   const Text(
-                    'You only need to do this once.',
+                    'Sign in to start a conversation and keep in touch with friends.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white60),
-                  ),
-                  const SizedBox(height: 28),
-                  TextFormField(
-                    controller: _nameController,
-                    autofocus: true,
-                    maxLength: 32,
-                    style: const TextStyle(color: Colors.white),
-                    textInputAction: TextInputAction.done,
-                    onFieldSubmitted: (_) => _save(),
-                    decoration: const InputDecoration(
-                      hintText: 'Your name',
-                      counterText: '',
-                      filled: true,
-                      fillColor: Color(0xFF1E293B),
+                    style: TextStyle(
+                      color: Color(0xFF9BAEB0),
+                      fontSize: 15,
+                      height: 1.5,
                     ),
-                    validator: (value) => value == null || value.trim().isEmpty
-                        ? 'Enter your name'
-                        : null,
                   ),
-                  if (_errorMessage != null) ...[
-                    const SizedBox(height: 12),
+                  const SizedBox(height: 30),
+                  SizedBox(
+                    height: 54,
+                    child: FilledButton(
+                      onPressed: isLoading ? null : onSignIn,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF202124),
+                        disabledBackgroundColor: Colors.white.withValues(
+                          alpha: .8,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      child: isLoading
+                          ? const SizedBox(
+                              width: 21,
+                              height: 21,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Color(0xFF0E8B86),
+                              ),
+                            )
+                          : const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  'G',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF4285F4),
+                                  ),
+                                ),
+                                SizedBox(width: 12),
+                                Text(
+                                  'Continue with Google',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 16),
                     Text(
-                      _errorMessage!,
+                      errorMessage!,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.redAccent),
+                      style: const TextStyle(
+                        color: Color(0xFFFF9B8F),
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
                     ),
                   ],
-                  const SizedBox(height: 20),
-                  ElevatedButton(
-                    onPressed: _isSaving ? null : _save,
-                    child: Text(_isSaving ? 'Saving...' : 'Continue'),
-                  ),
                 ],
               ),
             ),
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
 }

@@ -39,6 +39,11 @@ lib/
             └── pages/call_page.dart                      Call UI
 ```
 
+Friend chats store transient typing presence in
+`chats/{chatId}/typing/{userId}`. The sender refreshes presence while active
+and clears it on idle, send, or leaving the chat; receivers expire stale
+indicators after ten seconds.
+
 ## Key files for handover
 
 | File | Responsibility |
@@ -123,6 +128,11 @@ those platforms are enabled).
 - Matchmaking queries by `status` and filters the `lastSeen` heartbeat locally,
   so it does not require a manually deployed composite Firestore index.
 - Confirm microphone permission is present and tested on Android and iOS.
+- On Android, allow nearby-device access when prompted so calls can route to
+  Bluetooth headsets. LiveKit calls default to receiver/headset routing; wired
+  and Bluetooth devices take priority, while the in-call speaker control
+  explicitly selects loudspeaker. AI calls use the Vapi/Daily automatic
+  Bluetooth/wired route selection.
 - Use a unique authenticated user ID when authentication is introduced; the
   current identity is an anonymous ID persisted per installation.
 
@@ -138,7 +148,9 @@ flutter test
 For manual multi-user testing, use two physical devices (or a device and
 emulator) with separate app storage. Start a call on both devices, verify they
 receive the same room ID and connect, then test cancel, hang-up, backgrounding,
-network loss, and force-close while searching.
+network loss, and force-close while searching. Repeat calls with Bluetooth and
+wired headsets connected; verify audio stays on the headset, then test switching
+between receiver and loudspeaker in one-to-one calls and panels.
 
 For concurrency testing at 100–200 users, do not rely only on client devices.
 Use a controlled test harness against a Firebase Emulator or a dedicated test

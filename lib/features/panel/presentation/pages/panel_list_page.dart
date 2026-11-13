@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:quick_call/core/widgets/app_loader.dart';
 import 'package:provider/provider.dart';
 
 import '../../domain/entities/panel.dart';
@@ -17,6 +18,7 @@ class PanelListPage extends StatefulWidget {
 
 class _PanelListPageState extends State<PanelListPage> {
   late final PanelListController _controller;
+  bool _isCreatingPanel = false;
 
   @override
   void initState() {
@@ -31,24 +33,43 @@ class _PanelListPageState extends State<PanelListPage> {
   }
 
   Future<void> _createPanel() async {
+    if (_isCreatingPanel) return;
     final result = await CreatePanelDialog.show(context);
     if (result == null || !mounted) return;
 
-    final panelId = await _controller.createPanel(result, widget.displayName);
-    if (!mounted) return;
+    setState(() => _isCreatingPanel = true);
+    try {
+      final panelId = await _controller.createPanel(result, widget.displayName);
+      if (!mounted) return;
 
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PanelRoomPage(
-          panelId: panelId,
-          displayName: widget.displayName,
-          isHost: true,
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => PanelRoomPage(
+            panelId: panelId,
+            displayName: widget.displayName,
+            isHost: true,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not create the panel. Check your connection and try again.',
+              ),
+            ),
+          );
+      }
+    } finally {
+      if (mounted) setState(() => _isCreatingPanel = false);
+    }
   }
 
   Future<void> _joinPanel(Panel panel) async {
+    if (_controller.isRemoved(panel)) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PanelRoomPage(
@@ -58,6 +79,85 @@ class _PanelListPageState extends State<PanelListPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _requestRejoin(Panel panel) async {
+    try {
+      await _controller.requestRejoin(panel);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Rejoin request sent to the host.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not send request: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _manageRemovedUsers(Panel panel) async {
+    final userId = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text(
+          'Removed users',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: panel.kickedUserIds.map((id) {
+              final requested = panel.rejoinRequestUserIds.contains(id);
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  id,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white),
+                ),
+                subtitle: requested
+                    ? const Text(
+                        'Requested to rejoin',
+                        style: TextStyle(color: Color(0xFF67E8F9)),
+                      )
+                    : null,
+                trailing: TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, id),
+                  child: const Text('Unblock'),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+    if (userId == null || !mounted) return;
+    try {
+      await _controller.unblockUser(panel, userId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('User unblocked for this panel.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not unblock user: $error')),
+        );
+      }
+    }
   }
 
   @override
@@ -84,19 +184,59 @@ class _PanelListPageState extends State<PanelListPage> {
           centerTitle: true,
         ),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: _createPanel,
+          onPressed: _isCreatingPanel ? null : _createPanel,
           backgroundColor: const Color(0xFF0E7490),
-          icon: const Icon(Icons.add, color: Colors.white),
-          label: const Text(
-            'Create Panel',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          icon: _isCreatingPanel
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.add, color: Colors.white),
+          label: Text(
+            _isCreatingPanel ? 'Creating…' : 'Create Panel',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
         body: Consumer<PanelListController>(
           builder: (context, controller, _) {
             if (controller.isLoading) {
-              return const Center(
-                child: CircularProgressIndicator(color: Color(0xFF06B6D4)),
+              return const Center(child: AppLoader());
+            }
+
+            if (controller.errorMessage != null) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.cloud_off_rounded,
+                        color: Colors.white54,
+                        size: 40,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        controller.errorMessage!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      const SizedBox(height: 12),
+                      TextButton.icon(
+                        onPressed: controller.retry,
+                        icon: const Icon(Icons.refresh_rounded),
+                        label: const Text('Try again'),
+                      ),
+                    ],
+                  ),
+                ),
               );
             }
 
@@ -107,8 +247,18 @@ class _PanelListPageState extends State<PanelListPage> {
             return ListView.builder(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
               itemCount: controller.panels.length,
-              itemBuilder: (_, i) =>
-                  _PanelCard(panel: controller.panels[i], onTap: _joinPanel),
+              itemBuilder: (_, i) {
+                final panel = controller.panels[i];
+                return _PanelCard(
+                  panel: panel,
+                  onTap: _joinPanel,
+                  isRemoved: controller.isRemoved(panel),
+                  isHost: controller.isHost(panel),
+                  hasRequestedRejoin: controller.hasRequestedRejoin(panel),
+                  onRequestRejoin: () => _requestRejoin(panel),
+                  onManageRemoved: () => _manageRemovedUsers(panel),
+                );
+              },
             );
           },
         ),
@@ -154,10 +304,23 @@ class _PanelListPageState extends State<PanelListPage> {
 // =============================================================================
 
 class _PanelCard extends StatelessWidget {
-  const _PanelCard({required this.panel, required this.onTap});
+  const _PanelCard({
+    required this.panel,
+    required this.onTap,
+    required this.isRemoved,
+    required this.isHost,
+    required this.hasRequestedRejoin,
+    required this.onRequestRejoin,
+    required this.onManageRemoved,
+  });
 
   final Panel panel;
   final void Function(Panel) onTap;
+  final bool isRemoved;
+  final bool isHost;
+  final bool hasRequestedRejoin;
+  final VoidCallback onRequestRejoin;
+  final VoidCallback onManageRemoved;
 
   @override
   Widget build(BuildContext context) {
@@ -170,14 +333,20 @@ class _PanelCard extends StatelessWidget {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: () => onTap(panel),
+          onTap: isRemoved ? null : () => onTap(panel),
           borderRadius: BorderRadius.circular(12),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
             decoration: BoxDecoration(
-              color: const Color(0xFF13272D),
+              color: isRemoved
+                  ? const Color(0xFF20282D)
+                  : const Color(0xFF13272D),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF29444A)),
+              border: Border.all(
+                color: isRemoved
+                    ? Colors.white.withValues(alpha: 0.12)
+                    : const Color(0xFF29444A),
+              ),
             ),
             child: Row(
               children: [
@@ -220,24 +389,30 @@ class _PanelCard extends StatelessWidget {
                               vertical: 3,
                             ),
                             decoration: BoxDecoration(
-                              color: const Color(
-                                0xFFB64040,
-                              ).withValues(alpha: 0.14),
+                              color:
+                                  (isRemoved
+                                          ? const Color(0xFF8B3030)
+                                          : const Color(0xFFB64040))
+                                      .withValues(alpha: 0.14),
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: const Row(
+                            child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
-                                  Icons.circle,
-                                  color: Color(0xFFFF7272),
-                                  size: 6,
+                                  isRemoved ? Icons.block : Icons.circle,
+                                  color: isRemoved
+                                      ? Color(0xFFFF8A8A)
+                                      : Color(0xFFFF7272),
+                                  size: 8,
                                 ),
                                 SizedBox(width: 4),
                                 Text(
-                                  'LIVE',
+                                  isRemoved ? 'REMOVED' : 'LIVE',
                                   style: TextStyle(
-                                    color: Color(0xFFFF8585),
+                                    color: isRemoved
+                                        ? Color(0xFFFF9C9C)
+                                        : Color(0xFFFF8585),
                                     fontSize: 9,
                                     fontWeight: FontWeight.w800,
                                   ),
@@ -247,6 +422,40 @@ class _PanelCard extends StatelessWidget {
                           ),
                         ],
                       ),
+                      if (isRemoved) ...[
+                        const SizedBox(height: 3),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: hasRequestedRejoin
+                                ? null
+                                : onRequestRejoin,
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 2,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            icon: Icon(
+                              hasRequestedRejoin
+                                  ? Icons.hourglass_top_rounded
+                                  : Icons.mark_email_unread_outlined,
+                              size: 14,
+                            ),
+                            label: Text(
+                              hasRequestedRejoin
+                                  ? 'REQUEST SENT'
+                                  : 'REQUEST TO REJOIN',
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 3),
                       Text(
                         'by ${panel.hostDisplayName.isEmpty ? 'Panel host' : panel.hostDisplayName}',
@@ -302,11 +511,21 @@ class _PanelCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Icon(
-                  Icons.arrow_forward_ios_rounded,
-                  size: 14,
-                  color: Colors.white.withValues(alpha: 0.4),
-                ),
+                if (isHost && panel.kickedUserIds.isNotEmpty)
+                  IconButton(
+                    tooltip: 'Manage removed users',
+                    onPressed: onManageRemoved,
+                    icon: const Icon(Icons.manage_accounts_outlined),
+                    color: const Color(0xFF67E8F9),
+                  )
+                else
+                  Icon(
+                    Icons.arrow_forward_ios_rounded,
+                    size: 14,
+                    color: isRemoved
+                        ? Colors.red.shade200
+                        : Colors.white.withValues(alpha: 0.4),
+                  ),
               ],
             ),
           ),

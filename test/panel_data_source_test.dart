@@ -32,7 +32,7 @@ void main() {
     expect(panel.data(), containsPair('participantCount', 1));
     expect(panel.data(), containsPair('durationMinutes', 60));
     expect(host.data(), containsPair('role', 'host'));
-    expect(host.data(), containsPair('isMuted', false));
+    expect(host.data(), containsPair('isMuted', true));
 
     final mappedPanel = (await dataSource.livePanelsStream().first).single;
     expect(mappedPanel.hostDisplayName, 'Host');
@@ -105,18 +105,80 @@ void main() {
     );
   });
 
-  test('leaving removes the participant and decrements the count', () async {
+  test(
+    'leaving marks the participant offline and decrements the count',
+    () async {
+      final panelId = await dataSource.createPanel(
+        'Town Hall',
+        'host-1',
+        'Host',
+      );
+      await dataSource.joinPanel(panelId, 'guest-1', 'Guest');
+
+      await dataSource.leavePanel(panelId, 'guest-1');
+
+      final panel = await firestore.collection('panels').doc(panelId).get();
+      final guest = await _participant(firestore, panelId, 'guest-1');
+
+      expect(panel.data()?['participantCount'], 1);
+      expect(guest.data()?['isOnline'], isFalse);
+      expect(guest.data()?['role'], 'audience');
+    },
+  );
+
+  test('leaving and rejoining preserves co-host and speaker roles', () async {
     final panelId = await dataSource.createPanel('Town Hall', 'host-1', 'Host');
-    await dataSource.joinPanel(panelId, 'guest-1', 'Guest');
+    await dataSource.joinPanel(panelId, 'cohost-1', 'Co-host');
+    await dataSource.updateRole(panelId, 'cohost-1', PanelRole.coHost);
+    await dataSource.joinPanel(panelId, 'speaker-1', 'Speaker');
+    await dataSource.approveMic(panelId, 'speaker-1');
 
-    await dataSource.leavePanel(panelId, 'guest-1');
+    await dataSource.leavePanel(panelId, 'cohost-1');
+    await dataSource.leavePanel(panelId, 'speaker-1');
+    await dataSource.joinPanel(panelId, 'cohost-1', 'Co-host');
+    await dataSource.joinPanel(panelId, 'speaker-1', 'Speaker');
 
+    final cohost = await _participant(firestore, panelId, 'cohost-1');
+    final speaker = await _participant(firestore, panelId, 'speaker-1');
     final panel = await firestore.collection('panels').doc(panelId).get();
-    final guest = await _participant(firestore, panelId, 'guest-1');
-
-    expect(panel.data()?['participantCount'], 1);
-    expect(guest.exists, isFalse);
+    expect(cohost.data()?['role'], 'co-host');
+    expect(cohost.data()?['isOnline'], isTrue);
+    expect(speaker.data()?['role'], 'speaker');
+    expect(speaker.data()?['isOnline'], isTrue);
+    expect(panel.data()?['participantCount'], 3);
   });
+
+  test(
+    'stale heartbeat cleanup marks a force-closed participant offline',
+    () async {
+      final panelId = await dataSource.createPanel(
+        'Town Hall',
+        'host-1',
+        'Host',
+      );
+      await dataSource.joinPanel(panelId, 'guest-1', 'Guest');
+      await firestore
+          .collection('panels')
+          .doc(panelId)
+          .collection('participants')
+          .doc('guest-1')
+          .update({
+            'lastSeen': Timestamp.fromDate(
+              DateTime.now().toUtc().subtract(const Duration(seconds: 46)),
+            ),
+          });
+
+      await dataSource.cleanupStaleParticipants(panelId);
+
+      final panel = await firestore.collection('panels').doc(panelId).get();
+      final guest = await _participant(firestore, panelId, 'guest-1');
+      final host = await _participant(firestore, panelId, 'host-1');
+      expect(guest.data()?['isOnline'], isFalse);
+      expect(guest.data()?['role'], 'audience');
+      expect(host.exists, isTrue);
+      expect(panel.data()?['participantCount'], 1);
+    },
+  );
 
   test(
     'kicking and repeated leave do not decrement below actual members',
@@ -138,11 +200,52 @@ void main() {
 
   test('ending a panel changes its status', () async {
     final panelId = await dataSource.createPanel('Town Hall', 'host-1', 'Host');
+    await dataSource.joinPanel(panelId, 'guest-1', 'Guest');
 
     await dataSource.endPanel(panelId);
 
     final panel = await firestore.collection('panels').doc(panelId).get();
+    final participants = await firestore
+        .collection('panels')
+        .doc(panelId)
+        .collection('participants')
+        .get();
     expect(panel.data()?['status'], 'ended');
+    expect(panel.data()?['participantCount'], 0);
+    expect(participants.docs, isEmpty);
+  });
+
+  test('cannot join a panel after the host destroys it', () async {
+    final panelId = await dataSource.createPanel('Town Hall', 'host-1', 'Host');
+    await dataSource.endPanel(panelId);
+
+    await expectLater(
+      dataSource.joinPanel(panelId, 'guest-1', 'Guest'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('host cannot rejoin a panel after it has ended', () async {
+    final panelId = await dataSource.createPanel('Town Hall', 'host-1', 'Host');
+    await dataSource.endPanel(panelId);
+
+    await expectLater(
+      dataSource.joinPanelAsHost(panelId, 'host-1', 'Host'),
+      throwsA(isA<StateError>()),
+    );
+    final host = await _participant(firestore, panelId, 'host-1');
+    expect(host.exists, isFalse);
+  });
+
+  test('non-host cannot use host rejoin path', () async {
+    final panelId = await dataSource.createPanel('Town Hall', 'host-1', 'Host');
+
+    await expectLater(
+      dataSource.joinPanelAsHost(panelId, 'guest-1', 'Guest'),
+      throwsA(isA<StateError>()),
+    );
+    final guest = await _participant(firestore, panelId, 'guest-1');
+    expect(guest.exists, isFalse);
   });
 
   test('legacy panel documents default to a one-hour duration', () async {

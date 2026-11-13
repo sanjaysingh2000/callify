@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../../core/config/livekit_config.dart';
+import '../../../../core/services/call_audio_permissions.dart';
 
 /// Callback typedefs for LiveKit events.
 typedef VoidEventCallback = void Function();
+typedef ParticipantIdentityCallback = void Function(String identity);
 
 /// Manages a LiveKit room connection for audio-only calls.
 ///
@@ -23,7 +26,7 @@ class LiveKitService {
   bool _isDisposed = false;
 
   bool _isMuted = false;
-  bool _isSpeakerOn = true;
+  bool _isSpeakerOn = false;
 
   /// Whether the local microphone is muted.
   bool get isMuted => _isMuted;
@@ -37,9 +40,15 @@ class LiveKitService {
   /// Whether the service is connected to a room.
   bool get isConnected => _room?.connectionState == ConnectionState.connected;
 
+  /// Number of participants currently connected to this room, including self.
+  int get connectedParticipantCount {
+    if (!isConnected) return 0;
+    return (_room?.remoteParticipants.length ?? 0) + 1;
+  }
+
   // Callbacks
   VoidEventCallback? onPartnerJoined;
-  VoidEventCallback? onPartnerLeft;
+  ParticipantIdentityCallback? onPartnerLeft;
   VoidEventCallback? onDisconnected;
   void Function(String reason)? onError;
 
@@ -48,6 +57,8 @@ class LiveKitService {
   // ---------------------------------------------------------------------------
 
   static String get _serverUrl => LiveKitConfig.serverUrl;
+
+  void Function(Set<String> identities)? onActiveSpeakersChanged;
 
   // ---------------------------------------------------------------------------
   // Token generation is intentionally handled by a backend service.
@@ -79,24 +90,40 @@ class LiveKitService {
       throw StateError('Cannot connect: LiveKitService is disposed');
     }
 
-    final token = await _generateToken(roomName: roomName, identity: identity);
-
-    // Create the room with audio-optimised options.
-    _room = Room(
-      roomOptions: const RoomOptions(
-        adaptiveStream: true,
-        dynacast: true,
-        defaultAudioPublishOptions: AudioPublishOptions(
-          dtx: true, // Save bandwidth during silence.
-        ),
-      ),
-    );
-
-    // Set up event listeners before connecting.
-    _listener = _room!.createListener();
-    _setupEventListeners();
-
     try {
+      if (defaultTargetPlatform == TargetPlatform.android && enableMicrophone) {
+        await _requestMicrophonePermission();
+      }
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        await CallAudioPermissions.requestBluetoothConnect();
+      }
+      if (defaultTargetPlatform == TargetPlatform.android && enableMicrophone) {
+        // Start while the Flutter activity is in the foreground, before
+        // awaiting network work that could outlive Android's eligibility.
+        await _startAndroidCallForegroundService();
+      }
+
+      final token = await _generateToken(
+        roomName: roomName,
+        identity: identity,
+      );
+
+      // Create the room with audio-optimised options.
+      _room = Room(
+        roomOptions: const RoomOptions(
+          adaptiveStream: true,
+          dynacast: true,
+          defaultAudioOutputOptions: AudioOutputOptions(speakerOn: false),
+          defaultAudioPublishOptions: AudioPublishOptions(
+            dtx: true, // Save bandwidth during silence.
+          ),
+        ),
+      );
+
+      // Set up event listeners before connecting.
+      _listener = _room!.createListener();
+      _setupEventListeners();
+
       // Connect to LiveKit Cloud with a timeout.
       await _room!
           .connect(
@@ -106,12 +133,11 @@ class LiveKitService {
           )
           .timeout(const Duration(seconds: 15));
 
+      await _room!.setSpeakerOn(_isSpeakerOn);
+
       // Listeners in a panel must not publish until a host promotes them.
       _isMuted = !enableMicrophone;
       await _room!.localParticipant?.setMicrophoneEnabled(enableMicrophone);
-      if (defaultTargetPlatform == TargetPlatform.android) {
-        await _callForegroundChannel.invokeMethod<void>('start');
-      }
 
       debugPrint('[LiveKit] Connected to room: $roomName as $identity');
     } catch (e) {
@@ -137,7 +163,7 @@ class LiveKitService {
       })
       ..on<ParticipantDisconnectedEvent>((event) {
         debugPrint('[LiveKit] Partner left: ${event.participant.identity}');
-        if (!_isDisposed) onPartnerLeft?.call();
+        if (!_isDisposed) onPartnerLeft?.call(event.participant.identity);
       })
       ..on<RoomDisconnectedEvent>((event) {
         debugPrint('[LiveKit] Disconnected: ${event.reason}');
@@ -154,6 +180,11 @@ class LiveKitService {
       })
       ..on<RoomReconnectedEvent>((_) {
         debugPrint('[LiveKit] Reconnected!');
+      })
+      ..on<ActiveSpeakersChangedEvent>((event) {
+        if (_isDisposed) return;
+        final ids = event.speakers.map((p) => p.identity).toSet();
+        onActiveSpeakersChanged?.call(ids);
       });
   }
 
@@ -184,6 +215,10 @@ class LiveKitService {
     final previousMuted = _isMuted;
     _isMuted = !enabled;
     try {
+      if (enabled && defaultTargetPlatform == TargetPlatform.android) {
+        await _requestMicrophonePermission();
+        await _startAndroidCallForegroundService();
+      }
       await _room!.localParticipant?.setMicrophoneEnabled(enabled);
     } catch (e) {
       _isMuted = previousMuted;
@@ -191,17 +226,37 @@ class LiveKitService {
     }
   }
 
+  Future<void> _requestMicrophonePermission() async {
+    final permission = await Permission.microphone.request();
+    if (!permission.isGranted) {
+      throw StateError(
+        'Microphone permission is required to join an audio call.',
+      );
+    }
+  }
+
+  Future<void> _startAndroidCallForegroundService() async {
+    await _callForegroundChannel.invokeMethod<void>('start');
+  }
+
   /// Toggles between earpiece and loudspeaker.
   Future<void> toggleSpeaker() async {
     if (_isDisposed) return;
-    _isSpeakerOn = !_isSpeakerOn;
     try {
-      await Hardware.instance.setSpeakerphoneOn(_isSpeakerOn);
+      await setSpeakerphoneOn(!_isSpeakerOn);
     } catch (e) {
-      // Revert state on failure.
-      _isSpeakerOn = !_isSpeakerOn;
       debugPrint('[LiveKit] toggleSpeaker failed: $e');
     }
+  }
+
+  /// Selects loudspeaker or earpiece as the audio output.
+  Future<void> setSpeakerphoneOn(bool enabled) async {
+    if (_isDisposed) return;
+    final room = _room;
+    if (room != null && isConnected) {
+      await room.setSpeakerOn(enabled);
+    }
+    _isSpeakerOn = enabled;
   }
 
   // ---------------------------------------------------------------------------
@@ -218,6 +273,7 @@ class LiveKitService {
     onPartnerLeft = null;
     onDisconnected = null;
     onError = null;
+    onActiveSpeakersChanged = null; // add this
 
     _listener?.dispose();
     _listener = null;
@@ -236,7 +292,7 @@ class LiveKitService {
     await _stopAndroidCallForegroundService();
 
     _isMuted = false;
-    _isSpeakerOn = true;
+    _isSpeakerOn = false;
 
     debugPrint('[LiveKit] Disposed');
   }

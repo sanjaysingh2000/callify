@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:quick_call/core/widgets/app_loader.dart';
 import 'package:provider/provider.dart';
 import 'package:quick_call/features/ai_calling/provider/ai_calling_provider.dart';
 
@@ -68,8 +69,8 @@ class _AiCallViewState extends State<_AiCallView>
     final phase = call.isCalling
         ? _Phase.live
         : call.isConnecting
-            ? _Phase.connecting
-            : _Phase.standby;
+        ? _Phase.connecting
+        : _Phase.standby;
     final accent = switch (phase) {
       _Phase.standby => _Palette.cyan,
       _Phase.connecting => _Palette.amber,
@@ -128,14 +129,20 @@ class _AiCallViewState extends State<_AiCallView>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Callify', style: _mono(size: 14, weight: FontWeight.w700, spacing: 2)),
-              Text('AI English Trainer', style: _mono(size: 10, color: _Palette.muted, spacing: 2)),
+              Text(
+                'Callify',
+                style: _mono(size: 14, weight: FontWeight.w700, spacing: 2),
+              ),
+              Text(
+                'AI English Trainer',
+                style: _mono(size: 10, color: _Palette.muted, spacing: 2),
+              ),
             ],
           ),
         ),
         AnimatedBuilder(
           animation: _ctrl,
-          builder: (_, __) {
+          builder: (_, _) {
             final blink = phase == _Phase.standby
                 ? 1.0
                 : 0.4 + 0.6 * (0.5 + 0.5 * math.sin(_ctrl.value * math.pi * 4));
@@ -158,7 +165,15 @@ class _AiCallViewState extends State<_AiCallView>
                     ),
                   ),
                   const SizedBox(width: 6),
-                  Text(label, style: _mono(size: 11, weight: FontWeight.w700, color: accent, spacing: 1.5)),
+                  Text(
+                    label,
+                    style: _mono(
+                      size: 11,
+                      weight: FontWeight.w700,
+                      color: accent,
+                      spacing: 1.5,
+                    ),
+                  ),
                 ],
               ),
             );
@@ -174,14 +189,23 @@ class _AiCallViewState extends State<_AiCallView>
     final s = (call.secondsLeft % 60).toString().padLeft(2, '0');
 
     final Widget center = switch (phase) {
-      _Phase.standby => Icon(Icons.settings_voice, key: const ValueKey('s'), color: accent, size: 44),
+      _Phase.standby => Icon(
+        Icons.settings_voice,
+        key: const ValueKey('s'),
+        color: accent,
+        size: 44,
+      ),
       _Phase.connecting => SizedBox(
-          key: const ValueKey('c'),
-          width: 40,
-          height: 40,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: accent),
-        ),
-      _Phase.live => Text('$m:$s', key: const ValueKey('l'), style: _mono(size: 30, weight: FontWeight.w700, color: accent)),
+        key: const ValueKey('c'),
+        width: 40,
+        height: 40,
+        child: AppLoader(size: 40, color: accent),
+      ),
+      _Phase.live => Text(
+        '$m:$s',
+        key: const ValueKey('l'),
+        style: _mono(size: 30, weight: FontWeight.w700, color: accent),
+      ),
     };
 
     return SizedBox(
@@ -192,7 +216,7 @@ class _AiCallViewState extends State<_AiCallView>
         children: [
           AnimatedBuilder(
             animation: _ctrl,
-            builder: (_, __) => CustomPaint(
+            builder: (_, _) => CustomPaint(
               size: const Size(280, 280),
               painter: _OrbPainter(
                 t: _ctrl.value,
@@ -214,9 +238,18 @@ class _AiCallViewState extends State<_AiCallView>
   // ---------- Status text ----------
   Widget _status(AiCallProvider call, _Phase phase, Color accent) {
     final (title, sub) = switch (phase) {
-      _Phase.standby => ('SYSTEM READY', 'Start a 2 minute session with the AI assistant.'),
-      _Phase.connecting => ('ESTABLISHING LINK', 'Connecting to the AI assistant. Please wait...'),
-      _Phase.live => ('CHANNEL OPEN', 'Speak naturally. The session ends automatically.'),
+      _Phase.standby => (
+        'SYSTEM READY',
+        'Start a 2 minute session with the AI assistant.',
+      ),
+      _Phase.connecting => (
+        'ESTABLISHING LINK',
+        'Connecting to the AI assistant. Please wait...',
+      ),
+      _Phase.live => (
+        'CHANNEL OPEN',
+        'Speak naturally. The session ends automatically.',
+      ),
     };
 
     return Column(
@@ -226,14 +259,23 @@ class _AiCallViewState extends State<_AiCallView>
           child: Text(
             title,
             key: ValueKey(title),
-            style: _mono(size: 18, weight: FontWeight.w700, color: accent, spacing: 3),
+            style: _mono(
+              size: 18,
+              weight: FontWeight.w700,
+              color: accent,
+              spacing: 3,
+            ),
           ),
         ),
         const SizedBox(height: 8),
         Text(
           sub,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: _Palette.muted, fontSize: 13, height: 1.4),
+          style: const TextStyle(
+            color: _Palette.muted,
+            fontSize: 13,
+            height: 1.4,
+          ),
         ),
         if (call.errorMessage != null && phase == _Phase.standby) ...[
           const SizedBox(height: 10),
@@ -254,7 +296,9 @@ class _AiCallViewState extends State<_AiCallView>
       _Phase.connecting => 'SYNC',
       _Phase.live => 'ACTIVE',
     };
-    final mic = phase != _Phase.live ? 'OFF' : (call.isMuted ? 'MUTED' : 'OPEN');
+    final mic = phase != _Phase.live
+        ? 'OFF'
+        : (call.isMuted ? 'MUTED' : 'OPEN');
 
     return Row(
       children: [
@@ -279,9 +323,19 @@ class _AiCallViewState extends State<_AiCallView>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label, style: _mono(size: 10, color: _Palette.muted, spacing: 1.5)),
+            Text(
+              label,
+              style: _mono(size: 10, color: _Palette.muted, spacing: 1.5),
+            ),
             const SizedBox(height: 4),
-            Text(value, style: _mono(size: 14, weight: FontWeight.w700, color: valueColor)),
+            Text(
+              value,
+              style: _mono(
+                size: 14,
+                weight: FontWeight.w700,
+                color: valueColor,
+              ),
+            ),
           ],
         ),
       ),
@@ -290,7 +344,9 @@ class _AiCallViewState extends State<_AiCallView>
 
   // ---------- Controls ----------
   Widget _controls(AiCallProvider call, _Phase phase, Color accent) {
-    final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(14));
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(14),
+    );
     final textStyle = _mono(size: 14, weight: FontWeight.w700, spacing: 2);
 
     if (phase == _Phase.live) {
@@ -306,7 +362,8 @@ class _AiCallViewState extends State<_AiCallView>
                 color: _Palette.surface,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                  color: (call.isMuted ? _Palette.red : Colors.white).withValues(alpha: 0.25),
+                  color: (call.isMuted ? _Palette.red : Colors.white)
+                      .withValues(alpha: 0.25),
                 ),
               ),
               child: Icon(
@@ -345,10 +402,13 @@ class _AiCallViewState extends State<_AiCallView>
             ? const SizedBox(
                 width: 16,
                 height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: _Palette.amber),
+                child: AppLoader(size: 16, color: _Palette.amber),
               )
             : const Icon(Icons.call),
-        label: Text(connecting ? 'CONNECTING...' : 'START AI CALL', style: textStyle),
+        label: Text(
+          connecting ? 'CONNECTING...' : 'START AI CALL',
+          style: textStyle,
+        ),
         style: FilledButton.styleFrom(
           backgroundColor: accent,
           foregroundColor: _Palette.bg,

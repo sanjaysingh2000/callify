@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../domain/entities/panel_participant.dart';
 import '../controllers/panel_room_controller.dart';
+import 'panel_profile_avatar.dart';
 
 /// Bottom sheet showing pending mic requests for the host/co-host to approve or deny.
 class MicRequestSheet extends StatefulWidget {
@@ -39,12 +40,22 @@ class _MicRequestSheetState extends State<MicRequestSheet> {
     Future<void> Function(String userId) action,
   ) async {
     if (_isClosing) return;
-    _isClosing = true;
+    setState(() => _isClosing = true);
     try {
       await action(userId);
-    } finally {
-      _popIfCurrent();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isClosing = false);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Could not update this speaking request. Try again.'),
+          ),
+        );
+      return;
     }
+    _popIfCurrent();
   }
 
   void _popIfCurrent() {
@@ -156,6 +167,7 @@ class _MicRequestSheetState extends State<MicRequestSheet> {
                       ),
                       itemBuilder: (context, index) => _RequestRow(
                         participant: requests[index],
+                        isBusy: _isClosing,
                         onApprove: () => _decide(
                           requests[index].userId,
                           widget.controller.approveMicRequest,
@@ -179,13 +191,15 @@ class _MicRequestSheetState extends State<MicRequestSheet> {
 class _RequestRow extends StatelessWidget {
   const _RequestRow({
     required this.participant,
+    required this.isBusy,
     required this.onApprove,
     required this.onDeny,
   });
 
   final PanelParticipant participant;
-  final VoidCallback onApprove;
-  final VoidCallback onDeny;
+  final bool isBusy;
+  final VoidCallback? onApprove;
+  final VoidCallback? onDeny;
 
   @override
   Widget build(BuildContext context) {
@@ -197,16 +211,12 @@ class _RequestRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 21,
+          PanelProfileAvatar(
+            size: 42,
+            imageBase64: participant.profileImageBase64,
+            fallback: initial,
+            fallbackFontSize: 14,
             backgroundColor: const Color(0xFF26384B),
-            child: Text(
-              initial,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -235,7 +245,7 @@ class _RequestRow extends StatelessWidget {
             ),
           ),
           IconButton(
-            onPressed: onDeny,
+            onPressed: isBusy ? null : onDeny,
             tooltip: 'Deny request',
             icon: const Icon(Icons.close_rounded),
             color: const Color(0xFFFCA5A5),
@@ -245,7 +255,7 @@ class _RequestRow extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           FilledButton.icon(
-            onPressed: onApprove,
+            onPressed: isBusy ? null : onApprove,
             icon: const Icon(Icons.check_rounded, size: 18),
             label: const Text('Allow'),
             style: FilledButton.styleFrom(

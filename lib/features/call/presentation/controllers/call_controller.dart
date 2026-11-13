@@ -74,10 +74,13 @@ class CallController extends ChangeNotifier {
 
   String? _userId;
   String? _partnerId;
+  String? get partnerId => _partnerId;
   bool _isReconnecting = false;
   bool _isHangingUp = false;
   bool _isDisposed = false;
   bool _matchHandled = false;
+  bool _hasConnected = false;
+  bool get canAddPartnerAsFriend => _hasConnected && _partnerId != null;
 
   /// Max retries when connecting timeout fires before giving up.
   static const int _maxConnectRetries = 2;
@@ -107,6 +110,7 @@ class CallController extends ChangeNotifier {
     try {
       _isReconnecting = false;
       _partnerId = null;
+      _hasConnected = false;
       final userId = await _deviceIdStore.getOrCreateDeviceId();
       _userId = userId;
       _matchHandled = false;
@@ -389,7 +393,7 @@ class CallController extends ChangeNotifier {
       }
     };
 
-    _liveKit.onPartnerLeft = () {
+    _liveKit.onPartnerLeft = (_) {
       if (_isDisposed) return;
       debugPrint('[CallController] Partner left the room');
       if (_state == CallState.connected) {
@@ -421,6 +425,7 @@ class CallController extends ChangeNotifier {
     if (_isDisposed || _state == CallState.connected) return;
     _connectingTimeoutTimer?.cancel();
     _connectingTimeoutTimer = null;
+    _hasConnected = true;
     _setState(CallState.connected);
     _startDurationTimer();
     final roomId = _roomId;

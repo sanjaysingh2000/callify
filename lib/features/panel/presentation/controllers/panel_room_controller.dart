@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -39,7 +40,10 @@ class PanelRoomController extends ChangeNotifier {
   Panel? get panel => _panel;
 
   List<PanelParticipant> _participants = [];
-  List<PanelParticipant> get participants => _participants;
+  List<PanelParticipant> get participants =>
+      _participants.where((participant) => participant.isActive).toList();
+  final Map<String, String?> _profileImages = {};
+  final Set<String> _profileImageLookups = {};
 
   bool _isConnecting = true;
   bool get isConnecting => _isConnecting;
@@ -72,10 +76,24 @@ class PanelRoomController extends ChangeNotifier {
   String? _latestMicRequestNotice;
   String? get latestMicRequestNotice => _latestMicRequestNotice;
 
+  int _actionErrorVersion = 0;
+  int get actionErrorVersion => _actionErrorVersion;
+  String? _latestActionError;
+  String? get latestActionError => _latestActionError;
+
   StreamSubscription? _participantsSub;
   StreamSubscription? _panelSub;
+  StreamSubscription? _emojiSub;
+  final Map<String, Map<String, dynamic>> _activeEmojiEvents = {};
+  final Map<String, Timer> _emojiTimers = {};
+  List<Map<String, dynamic>> get activeEmojiEvents =>
+      List.unmodifiable(_activeEmojiEvents.values);
   Timer? _panelDurationTimer;
+  Timer? _presenceTimer;
   Completer<void>? _joinInProgress;
+
+  Set<String> _speakingUserIds = {};
+  Set<String> get speakingUserIds => _speakingUserIds;
 
   /// Maximum panel duration defaults to one hour for existing and new rooms.
   Duration get maxPanelDuration =>
@@ -104,17 +122,18 @@ class PanelRoomController extends ChangeNotifier {
     final userId = _userId;
     if (userId == null) return null;
 
-    final index = _participants.indexWhere((p) => p.userId == userId);
+    final index = participants.indexWhere((p) => p.userId == userId);
     if (index == -1) return null;
-    return _participants[index];
+    return participants[index];
   }
 
   PanelRole? get myRole => myParticipant?.role;
 
   bool get isMicEnabled => _liveKit.isMicEnabled;
   bool get isSpeakerOn => _liveKit.isSpeakerOn;
+  int get liveMemberCount => _liveKit.connectedParticipantCount;
 
-  List<PanelParticipant> get speakers => _participants
+  List<PanelParticipant> get speakers => participants
       .where(
         (p) =>
             p.role == PanelRole.host ||
@@ -124,10 +143,10 @@ class PanelRoomController extends ChangeNotifier {
       .toList();
 
   List<PanelParticipant> get audienceMembers =>
-      _participants.where((p) => p.role == PanelRole.audience).toList();
+      participants.where((p) => p.role == PanelRole.audience).toList();
 
   List<PanelParticipant> get micRequests =>
-      _participants.where((p) => p.micRequested).toList();
+      participants.where((p) => p.micRequested).toList();
 
   // ---------------------------------------------------------------------------
   // Join / Create
@@ -136,55 +155,81 @@ class PanelRoomController extends ChangeNotifier {
   /// Join an existing panel as audience.
   Future<void> joinPanel(String panelId, String displayName) async {
     if (_isDisposed) return;
+    bool createdDocThisSession = false;
     _isJoining = true;
     final joinInProgress = Completer<void>();
     _joinInProgress = joinInProgress;
     notifyListeners();
     _isHost = false;
+    debugPrint('[PanelRoom] joinPanel START panelId=$panelId');
     try {
       _panelId = panelId;
       _userId = await _deviceIdStore.getOrCreateDeviceId();
+      debugPrint('[PanelRoom] userId=$_userId');
 
-      // Check if we already have a participant doc (e.g. host rejoining).
       final panel = await _dataSource.getPanel(panelId);
+      debugPrint(
+        '[PanelRoom] panel fetched: exists=${panel != null} '
+        'hostId=${panel?.hostId} status=${panel?.status}',
+      );
+
       final existingRole = await _dataSource.getParticipantRole(
         panelId,
         _userId!,
       );
+      debugPrint(
+        '[PanelRoom] existingRole=${existingRole?.toFirestoreString()}',
+      );
+
       if (existingRole != null) {
-        // We already have a doc — just reconnect without creating a new one.
         _isHost = existingRole == PanelRole.host;
         debugPrint(
-          '[PanelRoom] Rejoining as ${existingRole.toFirestoreString()}',
+          '[PanelRoom] Rejoining as ${existingRole.toFirestoreString()} '
+          '(preserving saved role)',
         );
+        if (_isHost) {
+          await _dataSource.joinPanelAsHost(panelId, _userId!, displayName);
+        } else {
+          await _dataSource.joinPanel(panelId, _userId!, displayName);
+        }
       } else if (panel?.hostId == _userId) {
+        debugPrint('[PanelRoom] No doc, but hostId matches -> joinPanelAsHost');
         await _dataSource.joinPanelAsHost(panelId, _userId!, displayName);
         _isHost = true;
-        debugPrint('[PanelRoom] Host rejoined and resumed host permissions');
       } else {
-        await _dataSource.joinPanel(panelId, _userId!, displayName);
+        debugPrint('[PanelRoom] No doc -> joining as audience');
+        createdDocThisSession = await _dataSource.joinPanel(
+          panelId,
+          _userId!,
+          displayName,
+        );
+        debugPrint('[PanelRoom] createdDocThisSession=$createdDocThisSession');
       }
 
+      debugPrint('[PanelRoom] connecting to LiveKit...');
       await _connectAndListen(panelId);
+      debugPrint('[PanelRoom] LiveKit connected + listeners attached');
 
-      // If we're the host (rejoining), enable mic.
-      if (_isHost && !_isLeaving) {
-        await _liveKit.enableMic();
-        if (!_isDisposed) {
-          await _dataSource.setMuted(panelId, _userId!, false);
-        }
-      }
-    } catch (e) {
+      debugPrint('[PanelRoom] joinPanel DONE');
+    } catch (e, st) {
+      debugPrint('[PanelRoom] joinPanel ERROR: $e\n$st');
       if (_isDisposed) return;
-      debugPrint('[PanelRoom] joinPanel error: $e');
-      // Clean up: remove our participant doc since we failed to connect.
-      // Only if we actually created one (not a rejoin).
-      if (_userId != null && !_isHost) {
+
+      debugPrint(
+        '[PanelRoom] cleanup check: userId=$_userId '
+        'createdDocThisSession=$createdDocThisSession',
+      );
+      if (_userId != null) {
+        debugPrint(
+          '[PanelRoom] Marking participant offline after join failure',
+        );
         try {
           await _dataSource.leavePanel(panelId, _userId!);
         } catch (_) {}
       }
-      _errorMessage = 'Failed to join panel. Please try again.';
+      _errorMessage = e is StateError
+          ? e.message.toString()
+          : 'Failed to join panel. Please try again.';
       _isConnecting = false;
       notifyListeners();
     } finally {
@@ -212,11 +257,10 @@ class PanelRoomController extends ChangeNotifier {
 
       await _connectAndListen(panelId);
 
-      // Host starts with mic enabled.
+      // Start every participant muted; the host can unmute when ready.
       if (_isLeaving) return;
-      await _liveKit.enableMic();
       if (!_isDisposed) {
-        await _dataSource.setMuted(panelId, _userId!, false);
+        await _dataSource.setMuted(panelId, _userId!, true);
       }
     } catch (e) {
       if (_isDisposed) return;
@@ -241,6 +285,20 @@ class PanelRoomController extends ChangeNotifier {
   }
 
   Future<void> _connectAndListen(String panelId) async {
+    _liveKit.onPartnerJoined = () {
+      if (_isDisposed || _isLeaving) return;
+      notifyListeners();
+    };
+
+    _liveKit.onPartnerLeft = (identity) {
+      if (_isDisposed || _isLeaving || identity == _userId) return;
+      debugPrint('[PanelRoom] LiveKit participant disconnected: $identity');
+      notifyListeners();
+      // LiveKit detects a force-closed app independently of the killed client's
+      // timers. Remove its panel record so everyone sees the participant leave.
+      unawaited(_dataSource.leavePanel(panelId, identity));
+    };
+
     // Set up LiveKit disconnect callback.
     _liveKit.onDisconnected = () {
       if (!_isDisposed && !_isLeaving) {
@@ -249,7 +307,21 @@ class PanelRoomController extends ChangeNotifier {
       }
     };
 
-    await _liveKit.connect(roomName: panelId, identity: _userId!);
+    _liveKit.onActiveSpeakersChanged = (ids) {
+      if (_isDisposed || _isLeaving) return;
+      if (setEquals(ids, _speakingUserIds)) {
+        return; // unnecessary rebuild mat karo
+      }
+      _speakingUserIds = ids;
+      notifyListeners();
+    };
+
+    // CHANGE 1: listeners must not publish mic until promoted.
+    await _liveKit.connect(
+      roomName: panelId,
+      identity: _userId!,
+      enableMicrophone: false,
+    );
 
     if (_isDisposed || _isLeaving) return;
 
@@ -262,11 +334,8 @@ class PanelRoomController extends ChangeNotifier {
         .listen(
           (participants) {
             if (_isDisposed || _isLeaving) return;
-            final hadPreviousSnapshot = _hasReceivedFirstSnapshot;
 
-            // Kick detection: only check AFTER we've received at least one
-            // snapshot that included us. This prevents false positives on first
-            // load where our doc might not exist yet.
+            // Kick detection (unchanged)
             if (_hasReceivedFirstSnapshot &&
                 _userId != null &&
                 participants.isNotEmpty &&
@@ -301,8 +370,7 @@ class PanelRoomController extends ChangeNotifier {
                 .where((participant) => participant.userId == _userId)
                 .firstOrNull
                 ?.role;
-            if (hadPreviousSnapshot &&
-                (myCurrentRole == PanelRole.host ||
+            if ((myCurrentRole == PanelRole.host ||
                     myCurrentRole == PanelRole.coHost) &&
                 newRequests.isNotEmpty) {
               final names = newRequests
@@ -315,20 +383,76 @@ class PanelRoomController extends ChangeNotifier {
                   ? 'A listener wants to speak'
                   : '${names.join(', ')} want to speak';
               _micRequestEventVersion++;
-              unawaited(HapticFeedback.vibrate().catchError((_) {}));
+              debugPrint(
+                '[PanelRoom] New mic request from ${newRequests.map((p) => p.userId).join(', ')}; notifying $myCurrentRole.',
+              );
+              unawaited(_vibrateForMicRequest());
+            }
+
+            // CHANGE 2: sync forced mute / demote to the local LiveKit mic.
+            final me = participants
+                .where((p) => p.userId == _userId)
+                .firstOrNull;
+            if (me != null) {
+              final shouldBeMuted = me.isMuted || !me.canSpeak;
+              if (shouldBeMuted && _liveKit.isMicEnabled) {
+                unawaited(_liveKit.disableMic());
+              }
             }
 
             // Sort: host first, then co-hosts, speakers, audience.
             participants.sort((a, b) => a.role.index.compareTo(b.role.index));
-            _participants = participants;
+            _participants = participants
+                .map(
+                  (participant) => participant.copyWith(
+                    profileImageBase64: _profileImages[participant.userId],
+                  ),
+                )
+                .toList();
             notifyListeners();
+            _loadProfileImages(participants);
           },
           onError: (e) {
             debugPrint('[PanelRoom] Participants stream error: $e');
           },
         );
 
-    // Listen to panel status.
+    _emojiSub = _dataSource
+        .emojiEventsStream(panelId)
+        .listen(
+          (snapshot) {
+            if (_isDisposed || _isLeaving) return;
+            final now = DateTime.now();
+            for (final doc in snapshot.docs.reversed) {
+              if (_activeEmojiEvents.containsKey(doc.id)) continue;
+              final data = doc.data();
+              final createdAt = data['createdAt'];
+              if (createdAt is! Timestamp ||
+                  now.difference(createdAt.toDate()) >
+                      const Duration(seconds: 4)) {
+                continue;
+              }
+
+              _activeEmojiEvents[doc.id] = {...data, 'eventId': doc.id};
+              _emojiTimers[doc.id] = Timer(const Duration(seconds: 3), () {
+                _emojiTimers.remove(doc.id)?.cancel();
+                _activeEmojiEvents.remove(doc.id);
+                if (!_isDisposed) notifyListeners();
+              });
+            }
+            while (_activeEmojiEvents.length > 6) {
+              final oldestId = _activeEmojiEvents.keys.first;
+              _activeEmojiEvents.remove(oldestId);
+              _emojiTimers.remove(oldestId)?.cancel();
+            }
+            notifyListeners();
+          },
+          onError: (Object error) {
+            debugPrint('[PanelRoom] Emoji stream error: $error');
+          },
+        );
+
+    // Listen to panel status (unchanged)
     _panelSub = _dataSource
         .panelStream(panelId)
         .listen(
@@ -339,9 +463,8 @@ class PanelRoomController extends ChangeNotifier {
               _startPanelDurationTimer(panel.createdAt, panel.duration);
             }
 
-            // If panel ended and I'm not the host, auto-leave.
-            if (panel != null && panel.status == 'ended' && !_isHost) {
-              debugPrint('[PanelRoom] Panel ended by host — leaving');
+            if (panel == null || panel.status == 'ended') {
+              debugPrint('[PanelRoom] Panel ended or removed — leaving');
               _panelEnded = true;
               notifyListeners();
               _disconnectOnly();
@@ -354,7 +477,168 @@ class PanelRoomController extends ChangeNotifier {
             debugPrint('[PanelRoom] Panel stream error: $e');
           },
         );
+
+    // Keep our presence fresh and prune users whose app was force-closed.
+    _presenceTimer?.cancel();
+    _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_isDisposed || _isLeaving || _panelId == null || _userId == null) {
+        return;
+      }
+      // Refresh the view even when Firestore has no new snapshot, so a user
+      // whose process was killed disappears as soon as their heartbeat expires.
+      notifyListeners();
+      unawaited(_dataSource.updateHeartbeat(_panelId!, _userId!));
+      unawaited(_dataSource.cleanupStaleParticipants(_panelId!));
+    });
+    unawaited(_dataSource.updateHeartbeat(panelId, _userId!));
   }
+
+  // Keep participant documents small; load each profile photo once per room.
+  // The participant stream can update frequently during a live panel.
+  void _loadProfileImages(List<PanelParticipant> participants) {
+    for (final participant in participants) {
+      if (!_profileImageLookups.add(participant.userId)) continue;
+      unawaited(_loadProfileImage(participant.userId));
+    }
+  }
+
+  Future<void> _loadProfileImage(String userId) async {
+    try {
+      final image = await _dataSource.getProfileImage(userId);
+      if (_isDisposed) return;
+      if (image != null && image.isNotEmpty) {
+        _profileImages[userId] = image;
+        _participants = _participants
+            .map(
+              (participant) => participant.userId == userId
+                  ? participant.copyWith(profileImageBase64: image)
+                  : participant,
+            )
+            .toList();
+        notifyListeners();
+      }
+    } catch (error) {
+      debugPrint(
+        '[PanelRoom] Could not load profile image for $userId: $error',
+      );
+    }
+  }
+
+  // Future<void> _connectAndListen(String panelId) async {
+  //   // Set up LiveKit disconnect callback.
+  //   _liveKit.onDisconnected = () {
+  //     if (!_isDisposed && !_isLeaving) {
+  //       debugPrint('[PanelRoom] LiveKit disconnected unexpectedly');
+  //       // Don't auto-leave — let the user see the UI and handle it.
+  //     }
+  //   };
+
+  //   await _liveKit.connect(roomName: panelId, identity: _userId!);
+
+  //   if (_isDisposed || _isLeaving) return;
+
+  //   _isConnecting = false;
+  //   notifyListeners();
+
+  //   // Listen to participants.
+  //   _participantsSub = _dataSource
+  //       .participantsStream(panelId)
+  //       .listen(
+  //         (participants) {
+  //           if (_isDisposed || _isLeaving) return;
+  //           final hadPreviousSnapshot = _hasReceivedFirstSnapshot;
+
+  //           // Kick detection: only check AFTER we've received at least one
+  //           // snapshot that included us. This prevents false positives on first
+  //           // load where our doc might not exist yet.
+  //           if (_hasReceivedFirstSnapshot &&
+  //               _userId != null &&
+  //               participants.isNotEmpty &&
+  //               !participants.any((p) => p.userId == _userId)) {
+  //             debugPrint(
+  //               '[PanelRoom] Detected kick — userId not in participants',
+  //             );
+  //             _wasKicked = true;
+  //             notifyListeners();
+  //             _disconnectOnly();
+  //             return;
+  //           }
+
+  //           // Mark that we got a snapshot containing ourselves.
+  //           if (_userId != null &&
+  //               participants.any((p) => p.userId == _userId)) {
+  //             _hasReceivedFirstSnapshot = true;
+  //           }
+
+  //           final previousRequestIds = _participants
+  //               .where((participant) => participant.micRequested)
+  //               .map((participant) => participant.userId)
+  //               .toSet();
+  //           final newRequests = participants
+  //               .where(
+  //                 (participant) =>
+  //                     participant.micRequested &&
+  //                     !previousRequestIds.contains(participant.userId),
+  //               )
+  //               .toList();
+  //           final myCurrentRole = participants
+  //               .where((participant) => participant.userId == _userId)
+  //               .firstOrNull
+  //               ?.role;
+  //           if (hadPreviousSnapshot &&
+  //               (myCurrentRole == PanelRole.host ||
+  //                   myCurrentRole == PanelRole.coHost) &&
+  //               newRequests.isNotEmpty) {
+  //             final names = newRequests
+  //                 .map((participant) => participant.displayName)
+  //                 .where((name) => name.isNotEmpty)
+  //                 .toList();
+  //             _latestMicRequestNotice = names.length == 1
+  //                 ? '${names.single} wants to speak'
+  //                 : names.isEmpty
+  //                 ? 'A listener wants to speak'
+  //                 : '${names.join(', ')} want to speak';
+  //             _micRequestEventVersion++;
+  //             unawaited(HapticFeedback.vibrate().catchError((_) {}));
+  //           }
+
+  //           // Sort: host first, then co-hosts, speakers, audience.
+  //           participants.sort((a, b) => a.role.index.compareTo(b.role.index));
+  //           _participants = participants;
+  //           notifyListeners();
+  //         },
+  //         onError: (e) {
+  //           debugPrint('[PanelRoom] Participants stream error: $e');
+  //         },
+  //       );
+
+  //   // Listen to panel status.
+  //   _panelSub = _dataSource
+  //       .panelStream(panelId)
+  //       .listen(
+  //         (panel) {
+  //           if (_isDisposed || _isLeaving) return;
+  //           _panel = panel;
+  //           if (panel != null && panel.isLive) {
+  //             _startPanelDurationTimer(panel.createdAt, panel.duration);
+  //           }
+
+  //           // If panel ended and I'm not the host, auto-leave.
+  //           if (panel != null && panel.status == 'ended' && !_isHost) {
+  //             debugPrint('[PanelRoom] Panel ended by host — leaving');
+  //             _panelEnded = true;
+  //             notifyListeners();
+  //             _disconnectOnly();
+  //             return;
+  //           }
+
+  //           notifyListeners();
+  //         },
+  //         onError: (e) {
+  //           debugPrint('[PanelRoom] Panel stream error: $e');
+  //         },
+  //       );
+  // }
 
   // ---------------------------------------------------------------------------
   // Leave / End
@@ -375,6 +659,8 @@ class PanelRoomController extends ChangeNotifier {
     _panelSub = null;
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
 
     try {
       await _liveKit.dispose();
@@ -396,6 +682,8 @@ class PanelRoomController extends ChangeNotifier {
     _panelSub = null;
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
 
     try {
       await _liveKit.dispose();
@@ -403,9 +691,18 @@ class PanelRoomController extends ChangeNotifier {
     if (!_isDisposed) notifyListeners();
   }
 
-  /// Explicitly ends the panel (host only) or leaves it (anyone else).
-  Future<void> endOrLeavePanel() async {
+  /// Leaves the panel while keeping it live for everyone else.
+  Future<void> leavePanel() => _finishPanelSession(destroyPanel: false);
+
+  /// Destroys the live panel and removes its participant records (host only).
+  Future<void> destroyPanel() => _finishPanelSession(destroyPanel: true);
+
+  /// Backwards-compatible exit action: hosts end the room, others leave.
+  Future<void> endOrLeavePanel() => _finishPanelSession(destroyPanel: _isHost);
+
+  Future<void> _finishPanelSession({required bool destroyPanel}) async {
     if (_isLeaving) return;
+    if (destroyPanel && !_isHost) return;
     _isLeaving = true;
     notifyListeners();
     await _joinInProgress?.future;
@@ -416,6 +713,8 @@ class PanelRoomController extends ChangeNotifier {
     _panelSub = null;
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
 
     try {
       await _liveKit.dispose();
@@ -425,21 +724,20 @@ class PanelRoomController extends ChangeNotifier {
     final userId = _userId;
     if (panelId != null && userId != null) {
       try {
-        if (_isHost) {
-          // Host explicitly ends the panel.
+        if (destroyPanel) {
           await _dataSource.endPanel(panelId);
         } else {
           await _dataSource.leavePanel(panelId, userId);
         }
       } catch (e) {
-        debugPrint('[PanelRoom] endOrLeavePanel cleanup error: $e');
+        debugPrint('[PanelRoom] panel exit cleanup error: $e');
       }
     }
     if (!_isDisposed) notifyListeners();
   }
 
-  /// Called when host presses back (not "End Panel"). Disconnects from
-  /// LiveKit but leaves the panel alive so the host can rejoin.
+  /// Disconnects without ending the room and marks this user offline while
+  /// preserving their role for a later rejoin.
   Future<void> leaveWithoutEnding() async {
     if (_isLeaving) return;
     _isLeaving = true;
@@ -452,28 +750,43 @@ class PanelRoomController extends ChangeNotifier {
     _panelSub = null;
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
 
     try {
       await _liveKit.dispose();
     } catch (_) {}
 
-    // Non-hosts still remove their participant doc.
-    if (!_isHost) {
-      final panelId = _panelId;
-      final userId = _userId;
-      if (panelId != null && userId != null) {
-        try {
-          await _dataSource.leavePanel(panelId, userId);
-        } catch (_) {}
+    final panelId = _panelId;
+    final userId = _userId;
+    if (panelId != null && userId != null) {
+      try {
+        await _dataSource.leavePanel(panelId, userId);
+      } catch (e) {
+        debugPrint('[PanelRoom] disconnect cleanup error: $e');
       }
     }
-    // Host: keeps their participant doc so they can rejoin.
+
+    // Keep participant docs for ALL users (not just host) so they can
+    // rejoin with their current role (co-host, speaker, etc.).
     if (!_isDisposed) notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
   // Mic controls
   // ---------------------------------------------------------------------------
+
+  /// Toggles between receiver/headset routing and the loudspeaker.
+  Future<void> toggleSpeaker() async {
+    if (_isDisposed || _isLeaving) return;
+
+    try {
+      await _liveKit.setSpeakerphoneOn(!_liveKit.isSpeakerOn);
+      if (!_isDisposed) notifyListeners();
+    } catch (error) {
+      _reportActionError('Could not switch audio output.', error);
+    }
+  }
 
   /// Toggles the local microphone. Only allowed if canSpeak.
   Future<void> toggleMic() async {
@@ -482,24 +795,61 @@ class PanelRoomController extends ChangeNotifier {
     if (me == null || !me.canSpeak) return;
 
     try {
-      if (_liveKit.isMicEnabled) {
-        await _liveKit.disableMic();
-        await _dataSource.setMuted(_panelId!, _userId!, true);
-      } else {
+      final expectedMicEnabled = !_liveKit.isMicEnabled;
+      if (expectedMicEnabled) {
         await _liveKit.enableMic();
-        await _dataSource.setMuted(_panelId!, _userId!, false);
+      } else {
+        await _liveKit.disableMic();
+      }
+      final micEnabled = _liveKit.isMicEnabled;
+      await _dataSource.setMuted(_panelId!, _userId!, !micEnabled);
+      if (micEnabled != expectedMicEnabled) {
+        throw StateError('LiveKit did not update the microphone state.');
       }
       if (!_isDisposed) notifyListeners();
     } catch (e) {
-      debugPrint('[PanelRoom] toggleMic error: $e');
+      _reportActionError(
+        'Could not change your microphone. Please try again.',
+        e,
+      );
     }
   }
 
-  /// Toggles speakerphone.
-  Future<void> toggleSpeaker() async {
-    if (_isDisposed) return;
-    await _liveKit.toggleSpeaker();
-    if (!_isDisposed) notifyListeners();
+  Future<void> sendEmoji(String emoji) async {
+    final participant = myParticipant;
+    final panelId = _panelId;
+    final userId = _userId;
+    if (_isDisposed ||
+        participant == null ||
+        panelId == null ||
+        userId == null) {
+      return;
+    }
+
+    try {
+      await _dataSource.sendEmoji(
+        panelId,
+        userId,
+        participant.displayName,
+        emoji,
+      );
+    } catch (e) {
+      _reportActionError('Could not send your reaction. Try again.', e);
+    }
+  }
+
+  Future<void> _vibrateForMicRequest() async {
+    try {
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        await const MethodChannel(
+          'quick_call/device_vibration',
+        ).invokeMethod<void>('vibrate');
+      } else {
+        await HapticFeedback.mediumImpact();
+      }
+    } catch (error) {
+      debugPrint('[PanelRoom] Hand-raise vibration error: $error');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -513,7 +863,10 @@ class PanelRoomController extends ChangeNotifier {
     try {
       await _dataSource.requestMic(_panelId!, _userId!);
     } catch (e) {
-      debugPrint('[PanelRoom] requestMic error: $e');
+      _reportActionError(
+        'Could not send your speaking request. Check your connection and try again.',
+        e,
+      );
     }
   }
 
@@ -521,22 +874,14 @@ class PanelRoomController extends ChangeNotifier {
   Future<void> approveMicRequest(String userId) async {
     if (_isDisposed || _panelId == null) return;
     if (myRole != PanelRole.host && myRole != PanelRole.coHost) return;
-    try {
-      await _dataSource.approveMic(_panelId!, userId);
-    } catch (e) {
-      debugPrint('[PanelRoom] approveMic error: $e');
-    }
+    await _dataSource.approveMic(_panelId!, userId);
   }
 
   /// Deny a mic request (host or co-host).
   Future<void> denyMicRequest(String userId) async {
     if (_isDisposed || _panelId == null) return;
     if (myRole != PanelRole.host && myRole != PanelRole.coHost) return;
-    try {
-      await _dataSource.denyMic(_panelId!, userId);
-    } catch (e) {
-      debugPrint('[PanelRoom] denyMic error: $e');
-    }
+    await _dataSource.denyMic(_panelId!, userId);
   }
 
   /// Kick a user. Only host can kick.
@@ -548,7 +893,7 @@ class PanelRoomController extends ChangeNotifier {
     try {
       await _dataSource.kickUser(_panelId!, userId);
     } catch (e) {
-      debugPrint('[PanelRoom] kickUser error: $e');
+      _reportActionError('Could not remove this participant. Try again.', e);
     }
   }
 
@@ -568,7 +913,7 @@ class PanelRoomController extends ChangeNotifier {
     try {
       await _dataSource.setMuted(_panelId!, userId, true);
     } catch (e) {
-      debugPrint('[PanelRoom] muteUser error: $e');
+      _reportActionError('Could not mute this participant. Try again.', e);
     }
   }
 
@@ -576,10 +921,12 @@ class PanelRoomController extends ChangeNotifier {
   Future<void> promoteToCoHost(String userId) async {
     if (_isDisposed || _panelId == null) return;
     if (myRole != PanelRole.host) return;
+    final target = _participants.where((p) => p.userId == userId).firstOrNull;
+    if (target == null || target.role != PanelRole.speaker) return;
     try {
       await _dataSource.updateRole(_panelId!, userId, PanelRole.coHost);
     } catch (e) {
-      debugPrint('[PanelRoom] promoteToCoHost error: $e');
+      _reportActionError('Could not make this participant a co-host.', e);
     }
   }
 
@@ -590,7 +937,7 @@ class PanelRoomController extends ChangeNotifier {
     try {
       await _dataSource.approveMic(_panelId!, userId);
     } catch (e) {
-      debugPrint('[PanelRoom] promoteToSpeaker error: $e');
+      _reportActionError('Could not make this participant a speaker.', e);
     }
   }
 
@@ -611,8 +958,16 @@ class PanelRoomController extends ChangeNotifier {
       await _dataSource.updateRole(_panelId!, userId, PanelRole.audience);
       await _dataSource.setMuted(_panelId!, userId, true);
     } catch (e) {
-      debugPrint('[PanelRoom] demoteToAudience error: $e');
+      _reportActionError('Could not move this participant to the audience.', e);
     }
+  }
+
+  void _reportActionError(String message, Object error) {
+    debugPrint('[PanelRoom] $message $error');
+    if (_isDisposed) return;
+    _latestActionError = message;
+    _actionErrorVersion++;
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -623,9 +978,16 @@ class PanelRoomController extends ChangeNotifier {
   void dispose() {
     _isDisposed = true;
     _participantsSub?.cancel();
+    _emojiSub?.cancel();
+    for (final timer in _emojiTimers.values) {
+      timer.cancel();
+    }
+    _emojiTimers.clear();
     _panelSub?.cancel();
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
     _liveKit.dispose();
     super.dispose();
   }
@@ -640,7 +1002,7 @@ class PanelRoomController extends ChangeNotifier {
     _panelDuration = elapsed.isNegative ? Duration.zero : elapsed;
 
     if (_panelDuration >= durationLimit) {
-      _expirePanel();
+      unawaited(_expirePanel());
       return;
     }
 
@@ -649,20 +1011,24 @@ class PanelRoomController extends ChangeNotifier {
       _panelDuration += const Duration(seconds: 1);
       notifyListeners();
 
-      if (_panelDuration >= durationLimit) _expirePanel();
+      if (_panelDuration >= durationLimit) unawaited(_expirePanel());
     });
   }
 
-  void _expirePanel() {
+  Future<void> _expirePanel() async {
     _panelDurationTimer?.cancel();
     _panelDurationTimer = null;
+    if (_panelEnded || _isLeaving) return;
     debugPrint('[PanelRoom] Panel duration reached — ending panel');
     if (_isHost) {
-      endOrLeavePanel();
+      await endOrLeavePanel();
+      if (_isDisposed) return;
+      _panelEnded = true;
+      notifyListeners();
     } else {
       _panelEnded = true;
       notifyListeners();
-      _disconnectOnly();
+      await _disconnectOnly();
     }
   }
 }

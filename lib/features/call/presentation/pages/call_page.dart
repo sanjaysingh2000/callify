@@ -1,9 +1,12 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:quick_call/core/widgets/app_loader.dart';
 import 'package:provider/provider.dart';
 
 import '../../data/datasources/last_call_store.dart';
+import '../../../friends/data/friend_data_source.dart';
+import '../../../../core/utils/device_id_store.dart';
 import '../../domain/entities/call_state.dart';
 import '../controllers/call_controller.dart';
 
@@ -20,6 +23,40 @@ class CallPage extends StatefulWidget {
 
 class _CallPageState extends State<CallPage> with TickerProviderStateMixin {
   late final CallController _controller;
+  bool _friendRequestSending = false;
+  bool _friendRequestSent = false;
+
+  Future<void> _sendFriendRequest() async {
+    final partnerId = _controller.canAddPartnerAsFriend
+        ? _controller.partnerId
+        : null;
+    if (partnerId == null || _friendRequestSending || _friendRequestSent) {
+      return;
+    }
+    setState(() => _friendRequestSending = true);
+    try {
+      final myId = await DeviceIdStore().getOrCreateDeviceId();
+      await FriendDataSource().sendRequest(
+        senderId: myId,
+        recipientId: partnerId,
+      );
+      if (!mounted) return;
+      setState(() => _friendRequestSent = true);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Friend request sent')));
+    } catch (error) {
+      if (!mounted) return;
+      final message = error is StateError
+          ? error.message
+          : 'Could not send friend request. Check your connection and try again.';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } finally {
+      if (mounted) setState(() => _friendRequestSending = false);
+    }
+  }
 
   // Pulse animation for searching state.
   late final AnimationController _pulseController;
@@ -144,13 +181,11 @@ class _CallPageState extends State<CallPage> with TickerProviderStateMixin {
       case CallState.connected:
         return _buildConnectedScreen(controller);
       case CallState.ended:
-        return _buildEndedScreen();
+        return _buildEndedScreen(controller);
       case CallState.error:
         return _buildErrorScreen(controller);
       case CallState.idle:
-        return const Center(
-          child: CircularProgressIndicator(color: Color(0xFF06B6D4)),
-        );
+        return const Center(child: AppLoader());
     }
   }
 
@@ -553,7 +588,7 @@ class _CallPageState extends State<CallPage> with TickerProviderStateMixin {
   // Ended screen
   // ---------------------------------------------------------------------------
 
-  Widget _buildEndedScreen() {
+  Widget _buildEndedScreen(CallController controller) {
     return Column(
       children: [
         _buildTopBar(null),
@@ -592,6 +627,100 @@ class _CallPageState extends State<CallPage> with TickerProviderStateMixin {
             fontSize: 12,
           ),
         ),
+        if (controller.canAddPartnerAsFriend) ...[
+          const SizedBox(height: 24),
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 28),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF172629),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withValues(alpha: .08)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF63DCC8).withValues(alpha: .12),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Icon(
+                    Icons.people_alt_rounded,
+                    color: Color(0xFF63DCC8),
+                  ),
+                ),
+                const SizedBox(width: 13),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Keep in touch',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      SizedBox(height: 3),
+                      Text(
+                        'Send a friend request for next time',
+                        style: TextStyle(
+                          color: Color(0xFF9BAEB0),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: 240,
+            height: 50,
+            child: FilledButton.icon(
+              onPressed: _friendRequestSending || _friendRequestSent
+                  ? null
+                  : _sendFriendRequest,
+              icon: _friendRequestSending
+                  ? const SizedBox(
+                      width: 17,
+                      height: 17,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFF0D2725),
+                      ),
+                    )
+                  : Icon(
+                      _friendRequestSent
+                          ? Icons.check_rounded
+                          : Icons.person_add_alt_1_rounded,
+                    ),
+              label: Text(
+                _friendRequestSent
+                    ? 'Request sent'
+                    : _friendRequestSending
+                    ? 'Sending request…'
+                    : 'Add friend',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF63DCC8),
+                foregroundColor: const Color(0xFF0D2725),
+                disabledBackgroundColor: const Color(
+                  0xFF63DCC8,
+                ).withValues(alpha: .55),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+            ),
+          ),
+        ],
         const Spacer(),
         Padding(
           padding: const EdgeInsets.only(bottom: 48),

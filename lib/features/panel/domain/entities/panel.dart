@@ -9,6 +9,8 @@ class Panel {
     required this.createdAt,
     required this.participantCount,
     this.durationMinutes = defaultDurationMinutes,
+    this.kickedUserIds = const [],
+    this.rejoinRequestUserIds = const [],
   });
 
   static const int defaultDurationMinutes = 60;
@@ -23,6 +25,8 @@ class Panel {
   final DateTime createdAt;
   final int participantCount;
   final int durationMinutes;
+  final List<String> kickedUserIds;
+  final List<String> rejoinRequestUserIds;
 
   Duration get duration => Duration(minutes: durationMinutes);
 
@@ -37,6 +41,8 @@ class Panel {
     DateTime? createdAt,
     int? participantCount,
     int? durationMinutes,
+    List<String>? kickedUserIds,
+    List<String>? rejoinRequestUserIds,
   }) {
     return Panel(
       id: id ?? this.id,
@@ -47,6 +53,8 @@ class Panel {
       createdAt: createdAt ?? this.createdAt,
       participantCount: participantCount ?? this.participantCount,
       durationMinutes: durationMinutes ?? this.durationMinutes,
+      kickedUserIds: kickedUserIds ?? this.kickedUserIds,
+      rejoinRequestUserIds: rejoinRequestUserIds ?? this.rejoinRequestUserIds,
     );
   }
 }

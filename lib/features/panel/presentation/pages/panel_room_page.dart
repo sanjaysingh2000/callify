@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:quick_call/core/widgets/app_loader.dart';
 import 'package:provider/provider.dart';
 
 import '../../domain/entities/panel_participant.dart';
@@ -29,6 +32,8 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
   bool _allowPop = false;
   bool _isHandlingBack = false;
   int _lastMicRequestEventVersion = 0;
+  int _lastActionErrorVersion = 0;
+  Timer? _micRequestSnackBarTimer;
 
   @override
   void initState() {
@@ -80,10 +85,27 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
       return;
     }
 
+    if (_controller.actionErrorVersion > _lastActionErrorVersion) {
+      _lastActionErrorVersion = _controller.actionErrorVersion;
+      final message = _controller.latestActionError;
+      if (mounted && message != null) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(message),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+      }
+    }
+
     if (_controller.micRequestEventVersion > _lastMicRequestEventVersion) {
       _lastMicRequestEventVersion = _controller.micRequestEventVersion;
       final notice = _controller.latestMicRequestNotice;
       if (mounted && notice != null) {
+        _micRequestSnackBarTimer?.cancel();
         final messenger = ScaffoldMessenger.of(context);
         messenger
           ..hideCurrentSnackBar()
@@ -92,6 +114,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
               content: Text(notice),
               backgroundColor: const Color(0xFF173042),
               behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 2),
               action: SnackBarAction(
                 label: 'VIEW',
                 textColor: const Color(0xFF67E8F9),
@@ -100,6 +123,9 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
               ),
             ),
           );
+        _micRequestSnackBarTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted) messenger.hideCurrentSnackBar();
+        });
       }
     }
   }
@@ -107,20 +133,157 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
   Future<void> _leaveFromBack() async {
     if (_isHandlingBack || _controller.isLeaving) return;
     _isHandlingBack = true;
-    _hasNavigatedAway = true;
-    await _controller.leaveWithoutEnding();
-    if (!mounted) return;
-    setState(() => _allowPop = true);
-    await WidgetsBinding.instance.endOfFrame;
-    if (mounted) Navigator.of(context).pop();
+    try {
+      final isHost = _controller.myRole == PanelRole.host;
+      var destroyPanel = false;
+
+      if (isHost) {
+        final action = await showDialog<_HostExitAction>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1E293B),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Text(
+              'Exit panel',
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Choose whether to leave the panel running or destroy it for everyone.',
+                  style: TextStyle(color: Colors.white70, height: 1.4),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    onPressed: () => Navigator.pop(ctx, _HostExitAction.leave),
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Leave panel'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0E7490),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    onPressed: () =>
+                        Navigator.pop(ctx, _HostExitAction.destroy),
+                    icon: const Icon(Icons.delete_forever_outlined),
+                    label: const Text('Destroy panel'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFB42332),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 48,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70,
+                      side: BorderSide(
+                        color: Colors.white.withValues(alpha: 0.2),
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        if (action == null || !mounted) return;
+        destroyPanel = action == _HostExitAction.destroy;
+      }
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          title: Text(
+            destroyPanel ? 'Destroy panel?' : 'Leave panel?',
+            style: const TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            destroyPanel
+                ? 'This will end the panel and remove everyone from it.'
+                : isHost
+                ? 'The panel will stay live for the other participants.'
+                : 'You will leave this panel.',
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            OutlinedButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              style: OutlinedButton.styleFrom(
+                backgroundColor: const Color(0xFF334155),
+                foregroundColor: Colors.white,
+                minimumSize: const Size(88, 44),
+                side: BorderSide(color: Colors.white.withValues(alpha: 0.45)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: const Text('No'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: destroyPanel
+                    ? Colors.red
+                    : const Color(0xFF0E7490),
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Yes'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+
+      _hasNavigatedAway = true;
+      if (destroyPanel) {
+        await _controller.destroyPanel();
+      } else {
+        await _controller.leavePanel();
+      }
+      if (!mounted) return;
+      setState(() => _allowPop = true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.of(context).pop();
+    } finally {
+      _isHandlingBack = false;
+    }
   }
 
   @override
   void dispose() {
+    _micRequestSnackBarTimer?.cancel();
     _controller.removeListener(_onControllerChanged);
     // If we haven't explicitly left (via kicked/ended/button), disconnect
-    // quietly. Host keeps their Firestore doc so they can rejoin.
-    // Non-host removes their participant doc.
+    // quietly. ALL users keep their Firestore doc so they can rejoin
+    // with their current role (host, co-host, speaker, etc.).
     if (!_hasNavigatedAway) {
       _controller.leaveWithoutEnding();
     }
@@ -138,7 +301,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
     // Host actions.
     if (myRole == PanelRole.host) {
       if (participant.role != PanelRole.host) {
-        if (participant.role != PanelRole.coHost) {
+        if (participant.role == PanelRole.speaker) {
           actions.add(
             _ActionItem(
               icon: Icons.star,
@@ -319,7 +482,9 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
                               vertical: 10,
                             ),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1E293B).withValues(alpha: 0.9),
+                              color: const Color(
+                                0xFF1E293B,
+                              ).withValues(alpha: 0.9),
                               borderRadius: BorderRadius.circular(14),
                               border: Border.all(
                                 color: Colors.amber.withValues(alpha: 0.4),
@@ -337,8 +502,8 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
                                 SizedBox(
                                   width: 16,
                                   height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                                  child: AppLoader(
+                                    size: 16,
                                     color: Colors.amber,
                                   ),
                                 ),
@@ -360,6 +525,31 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
                       ),
                     ),
                   ),
+                if (ctrl.activeEmojiEvents.isNotEmpty)
+                  Positioned(
+                    top: 88,
+                    left: 20,
+                    right: 20,
+                    child: IgnorePointer(
+                      child: Center(
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final event in ctrl.activeEmojiEvents)
+                              _EmojiBlast(
+                                key: ValueKey(event['eventId']),
+                                emoji: event['emoji'] as String? ?? '🎉',
+                                displayName:
+                                    event['displayName'] as String? ??
+                                    'Someone',
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           );
@@ -373,7 +563,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(color: Color(0xFF06B6D4)),
+          AppLoader(),
           SizedBox(height: 16),
           Text(
             'Joining panel...',
@@ -559,7 +749,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  'LIVE · ${ctrl.participants.length} members',
+                  'LIVE · ${ctrl.liveMemberCount} members',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -609,64 +799,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
   Widget _buildLeaveButton(PanelRoomController ctrl) {
     final isHost = ctrl.myRole == PanelRole.host;
     return GestureDetector(
-      onTap: () async {
-        if (ctrl.isLeaving || ctrl.isJoining) return;
-        if (isHost) {
-          // Confirm before ending panel.
-          final confirmed = await showDialog<bool>(
-            context: context,
-            builder: (ctx) => AlertDialog(
-              backgroundColor: const Color(0xFF1E293B),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              title: const Text(
-                'End Panel?',
-                style: TextStyle(color: Colors.white),
-              ),
-              content: const Text(
-                'This will end the panel for all participants.',
-                style: TextStyle(color: Colors.white70),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: Text(
-                    'Cancel',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.6),
-                    ),
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('End Panel'),
-                ),
-              ],
-            ),
-          );
-          if (confirmed != true || !mounted) return;
-          _hasNavigatedAway = true;
-          await ctrl.endOrLeavePanel();
-          if (mounted) {
-            setState(() => _allowPop = true);
-            await WidgetsBinding.instance.endOfFrame;
-            if (mounted) Navigator.of(context).pop();
-          }
-        } else {
-          _hasNavigatedAway = true;
-          await ctrl.endOrLeavePanel();
-          if (mounted) {
-            setState(() => _allowPop = true);
-            await WidgetsBinding.instance.endOfFrame;
-            if (mounted) Navigator.of(context).pop();
-          }
-        }
-      },
+      onTap: ctrl.isLeaving || ctrl.isJoining ? null : _leaveFromBack,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
@@ -674,7 +807,7 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
           borderRadius: BorderRadius.circular(12),
         ),
         child: Text(
-          isHost ? 'End Panel' : 'Leave',
+          isHost ? 'Exit' : 'Leave',
           style: TextStyle(
             color: isHost ? Colors.white : Colors.white70,
             fontSize: 13,
@@ -707,6 +840,8 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
               children: ctrl.speakers
                   .map(
                     (p) => ParticipantTile(
+                      isSpeaking:
+                          ctrl.speakingUserIds.contains(p.userId) && !p.isMuted,
                       participant: p,
                       onTap: () => _showParticipantActions(p),
                     ),
@@ -728,6 +863,8 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
               children: ctrl.audienceMembers
                   .map(
                     (p) => ParticipantTile(
+                      isSpeaking:
+                          ctrl.speakingUserIds.contains(p.userId) && !p.isMuted,
                       participant: p,
                       compact: true,
                       onTap: () => _showParticipantActions(p),
@@ -804,6 +941,17 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          _BottomButton(
+            icon: ctrl.isSpeakerOn ? Icons.volume_up : Icons.hearing,
+            label: ctrl.isSpeakerOn ? 'Speaker' : 'Earpiece',
+            color: ctrl.isSpeakerOn
+                ? const Color(0xFF10B981)
+                : Colors.white70,
+            onTap: ctrl.toggleSpeaker,
+          ),
+
+          const SizedBox(width: 16),
+
           // Mic toggle (speakers only).
           if (myRole != null &&
               (myRole == PanelRole.host ||
@@ -838,18 +986,233 @@ class _PanelRoomPageState extends State<PanelRoomPage> {
 
           const SizedBox(width: 16),
 
-          // Speaker toggle.
           _BottomButton(
-            icon: ctrl.isSpeakerOn ? Icons.volume_up : Icons.hearing,
-            label: ctrl.isSpeakerOn ? 'Speaker' : 'Earpiece',
-            color: const Color(0xFF06B6D4),
-            onTap: ctrl.toggleSpeaker,
+            icon: Icons.emoji_emotions_outlined,
+            label: 'Emoji',
+            color: const Color(0xFFFBBF24),
+            onTap: () => _showEmojiPicker(ctrl),
           ),
         ],
       ),
     );
   }
+
+  void _showEmojiPicker(PanelRoomController ctrl) {
+    const emojis = [
+      '😀',
+      '😂',
+      '🥰',
+      '😋',
+      '🤩',
+      '🥳',
+      '😎',
+      '🤔',
+      '😕',
+      '🫡',
+      '😮',
+      '😱',
+      '🥹',
+      '😢',
+      '😭',
+      '😞',
+      '😣',
+      '😬',
+      '🫠',
+      '😴',
+      '🤗',
+      '🙏',
+      '👏',
+      '🙌',
+      '👍',
+      '💔',
+    ];
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => SafeArea(
+        child: Container(
+          height: MediaQuery.sizeOf(sheetContext).height * .68,
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+          decoration: const BoxDecoration(
+            color: Color(0xFF14243A),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: .24),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Send a reaction',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        SizedBox(height: 3),
+                        Text(
+                          'Everyone in the panel will see it',
+                          style: TextStyle(
+                            color: Color(0xFF9BAEB0),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close emoji picker',
+                    onPressed: () => Navigator.of(sheetContext).pop(),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Color(0xFF9BAEB0),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Expanded(
+                child: GridView.builder(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  itemCount: emojis.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 6,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                  ),
+                  itemBuilder: (context, index) {
+                    final emoji = emojis[index];
+                    return Material(
+                      color: Colors.white.withValues(alpha: .055),
+                      borderRadius: BorderRadius.circular(14),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          ctrl.sendEmoji(emoji);
+                        },
+                        child: Center(
+                          child: Text(
+                            emoji,
+                            style: const TextStyle(fontSize: 27),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
+
+class _EmojiBlast extends StatefulWidget {
+  const _EmojiBlast({
+    super.key,
+    required this.emoji,
+    required this.displayName,
+  });
+
+  final String emoji;
+  final String displayName;
+
+  @override
+  State<_EmojiBlast> createState() => _EmojiBlastState();
+}
+
+class _EmojiBlastState extends State<_EmojiBlast>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 850),
+  )..forward();
+
+  late final Animation<double> _scale = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween<double>(
+        begin: .45,
+        end: 1.12,
+      ).chain(CurveTween(curve: Curves.easeOutBack)),
+      weight: 65,
+    ),
+    TweenSequenceItem(
+      tween: Tween<double>(
+        begin: 1.12,
+        end: 1.0,
+      ).chain(CurveTween(curve: Curves.easeOut)),
+      weight: 35,
+    ),
+  ]).animate(_controller);
+
+  late final Animation<double> _fade = CurvedAnimation(
+    parent: _controller,
+    curve: const Interval(0, .28, curve: Curves.easeOut),
+  );
+
+  late final Animation<double> _lift = Tween<double>(
+    begin: 18,
+    end: 0,
+  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _controller,
+    builder: (context, child) => Opacity(
+      opacity: _fade.value,
+      child: Transform.translate(
+        offset: Offset(0, _lift.value),
+        child: Transform.scale(scale: _scale.value, child: child),
+      ),
+    ),
+    child: Material(
+      color: const Color(0xFF101F33).withValues(alpha: .94),
+      borderRadius: BorderRadius.circular(26),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(widget.emoji, style: const TextStyle(fontSize: 48)),
+            Text(
+              widget.displayName,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+enum _HostExitAction { leave, destroy }
 
 // =============================================================================
 // Private widgets

@@ -15,13 +15,58 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
 
     await tester.pumpWidget(
-      const QuickCallApp(home: HomePage(displayName: 'Test User')),
+      const QuickCallApp(
+        home: HomePage(displayName: 'Test User'),
+        enableNetworkHandler: false,
+      ),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('Callify'), findsOneWidget);
     expect(find.text('Start Practice'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home entrance animates and respects reduced motion', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const QuickCallApp(
+        home: HomePage(displayName: 'Test User'),
+        enableNetworkHandler: false,
+      ),
+    );
+
+    expect(
+      tester
+          .widgetList<FadeTransition>(find.byType(FadeTransition))
+          .any((transition) => transition.opacity.value < 1),
+      isTrue,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widgetList<FadeTransition>(find.byType(FadeTransition))
+          .every((transition) => transition.opacity.value == 1),
+      isTrue,
+    );
+
+    await tester.pumpWidget(
+      const QuickCallApp(
+        home: MediaQuery(
+          data: MediaQueryData(disableAnimations: true),
+          child: HomePage(displayName: 'Test User'),
+        ),
+        enableNetworkHandler: false,
+      ),
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widgetList<FadeTransition>(find.byType(FadeTransition))
+          .every((transition) => transition.opacity.value == 1),
+      isTrue,
+    );
   });
 
   testWidgets('shows reconnect when a last practice partner is saved', (
@@ -33,33 +78,46 @@ void main() {
     });
 
     await tester.pumpWidget(
-      const QuickCallApp(home: HomePage(displayName: 'Test User')),
+      const QuickCallApp(
+        home: HomePage(displayName: 'Test User'),
+        enableNetworkHandler: false,
+      ),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('Reconnect to last user'), findsOneWidget);
   });
 
-  testWidgets('Talk with AI shows a coming soon message', (tester) async {
+  testWidgets('Talk with AI opens the AI trainer', (tester) async {
     await tester.pumpWidget(
-      const QuickCallApp(home: HomePage(displayName: 'Test User')),
+      const QuickCallApp(
+        home: HomePage(displayName: 'Test User'),
+        enableNetworkHandler: false,
+      ),
     );
     await tester.ensureVisible(find.text('Talk with AI'));
     await tester.tap(find.text('Talk with AI'));
-    await tester.pump();
-
-    expect(find.text('Talk with AI is coming soon'), findsOneWidget);
+    for (var frame = 0; frame < 5; frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(find.text('START AI CALL'), findsOneWidget);
   });
 
-  testWidgets('Friend List shows a coming soon message', (tester) async {
+  testWidgets('Friend List opens and handles unavailable Firestore', (
+    tester,
+  ) async {
     await tester.pumpWidget(
-      const QuickCallApp(home: HomePage(displayName: 'Test User')),
+      const QuickCallApp(
+        home: HomePage(displayName: 'Test User'),
+        enableNetworkHandler: false,
+      ),
     );
     await tester.ensureVisible(find.text('Friend List'));
     await tester.tap(find.text('Friend List'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    expect(find.text('Friend List is coming soon'), findsOneWidget);
+    expect(find.text('Your people'), findsOneWidget);
+    expect(find.text('Friends are unavailable'), findsOneWidget);
   });
 
   testWidgets('panel creation asks only for a panel title', (tester) async {
@@ -112,21 +170,22 @@ void main() {
     expect(find.text('Create Panel'), findsNothing);
   });
 
-  testWidgets('blank profile names are treated as missing and show onboarding', (
-    tester,
-  ) async {
-    final profileStore = _BlankNameProfileStore();
+  testWidgets(
+    'blank profile names are treated as missing and show onboarding',
+    (tester) async {
+      final profileStore = _BlankNameProfileStore();
 
-    await tester.pumpWidget(
-      MaterialApp(home: ProfileGatePage(profileStore: profileStore)),
-    );
+      await tester.pumpWidget(
+        MaterialApp(home: ProfileGatePage(profileStore: profileStore)),
+      );
 
-    await tester.pump();
-    await tester.pump();
+      await tester.pump();
+      await tester.pump();
 
-    expect(find.text('What should people call you?'), findsOneWidget);
-    expect(find.text('Start Practice'), findsNothing);
-  });
+      expect(find.text('What should people call you?'), findsOneWidget);
+      expect(find.text('Start Practice'), findsNothing);
+    },
+  );
 }
 
 class _BlankNameProfileStore extends UserProfileStore {

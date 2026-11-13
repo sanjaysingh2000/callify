@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 
 class CallForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -24,7 +25,13 @@ class CallForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification())
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (error: SecurityException) {
+            Log.e(TAG, "Android denied microphone foreground service startup", error)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         return START_NOT_STICKY
     }
 
@@ -69,6 +76,7 @@ class CallForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "CallForegroundService"
         private const val CHANNEL_ID = "active_call"
         private const val NOTIFICATION_ID = 1001
     }

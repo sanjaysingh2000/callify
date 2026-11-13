@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:vapi/vapi.dart';
 
+import '../../../core/services/call_audio_permissions.dart';
+
 class AiCallProvider extends ChangeNotifier {
   final VapiClient _client = VapiClient('57b0bcf1-b257-4cc0-a83d-c4d457fee3e2');
   VapiCall? _call;
@@ -26,6 +28,7 @@ class AiCallProvider extends ChangeNotifier {
     }
 
     try {
+      await CallAudioPermissions.requestBluetoothConnect();
       secondsLeft = 120;
       isMuted = false;
       errorMessage = null;

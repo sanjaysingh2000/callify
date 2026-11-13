@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-
+import 'package:quick_call/features/panel/presentation/pages/widgets/speaker_ring.dart';
 import '../../domain/entities/panel_participant.dart';
+import 'panel_profile_avatar.dart';
 
 /// Displays a single participant with avatar, name, role badge, and mic status.
 class ParticipantTile extends StatelessWidget {
@@ -9,11 +10,13 @@ class ParticipantTile extends StatelessWidget {
     required this.participant,
     this.onTap,
     this.compact = false,
+    this.isSpeaking = false,
   });
 
   final PanelParticipant participant;
   final VoidCallback? onTap;
   final bool compact;
+  final bool isSpeaking;
 
   Color _roleColor(PanelRole role) {
     switch (role) {
@@ -48,6 +51,7 @@ class ParticipantTile extends StatelessWidget {
     final size = compact ? 48.0 : 64.0;
     final fontSize = compact ? 10.0 : 12.0;
     final avatarFontSize = compact ? 18.0 : 22.0;
+    final imageBase64 = participant.profileImageBase64;
 
     return GestureDetector(
       onTap: onTap,
@@ -60,33 +64,35 @@ class ParticipantTile extends StatelessWidget {
             Stack(
               alignment: Alignment.bottomRight,
               children: [
-                Container(
-                  width: size,
-                  height: size,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        color.withValues(alpha: 0.7),
-                        color.withValues(alpha: 0.3),
-                      ],
+                SpeakingRing(
+                  isSpeaking: isSpeaking,
+                  child: Container(
+                    width: size,
+                    height: size,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          color.withValues(alpha: 0.7),
+                          color.withValues(alpha: 0.3),
+                        ],
+                      ),
+                      border: Border.all(
+                        color: color.withValues(alpha: 0.5),
+                        width: 2,
+                      ),
                     ),
-                    border: Border.all(
-                      color: color.withValues(alpha: 0.5),
-                      width: 2,
-                    ),
-                  ),
-                  child: Center(
-                    child: Text(
-                      participant.displayName.isNotEmpty
-                          ? participant.displayName[0].toUpperCase()
-                          : '?',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: avatarFontSize,
-                        fontWeight: FontWeight.w700,
+                    child: Center(
+                      child: PanelProfileAvatar(
+                        size: size,
+                        imageBase64: imageBase64,
+                        fallback: participant.displayName.isNotEmpty
+                            ? participant.displayName[0].toUpperCase()
+                            : '?',
+                        fallbackFontSize: avatarFontSize,
+                        backgroundColor: color.withValues(alpha: 0.3),
                       ),
                     ),
                   ),
@@ -154,8 +160,7 @@ class ParticipantTile extends StatelessWidget {
             if (label.isNotEmpty) ...[
               const SizedBox(height: 2),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(6),
